@@ -36,7 +36,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private String COLUMN_NAME_VERSION = "version";
 	static final int SERVER_PORT = 10000;
 	static final String TAG = SimpleDynamoProvider.class.getSimpleName();
-//	static String[] REMOTE_PORT = new String[]{"11108", "11112", "11116", "11120", "11124"};
+	static String[] REMOTE_PORT = new String[]{"11108", "11112", "11116", "11120", "11124"};
 
 	private String myPort =  "";
 	static String myId="";
@@ -46,17 +46,24 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	private StringBuilder receivedKeyValueQuery;
 	private StringBuilder sendKeyValueQuery;
+//	private StringBuilder receivedKeyValueQuery;
+//	private StringBuilder sendKeyValueQuery;
 	boolean insertKey = false;
 	boolean insertedKey = false;
-	private StringBuilder myKeyVal;
 	boolean signalQuery1=false;
 	boolean signalQuery2=false;
-
+	boolean signalQuery3=false;
+	private boolean signalDelete1 = false;
+	private boolean signalDelete2 = false;
+	private boolean signalInit1 = false;
+	private boolean signalInit2 = false;
+	boolean tableExist =true;
 	@Override
 	public boolean onCreate() {
 
 		dbHelper = new FeedReaderDbHelper(getContext());
 		SQLiteDatabase db = dbHelper.getWritableDatabase();
+//		boolean isDB = dbHelper.checkTable(db);
 		db.delete(TABLE_NAME, null, null);
 
 		TelephonyManager tel = (TelephonyManager) getContext().getSystemService(Context.TELEPHONY_SERVICE);
@@ -82,24 +89,104 @@ public class SimpleDynamoProvider extends ContentProvider {
 		portMap.put("11124","5562");
 
 		createDhtRing();
-
+		Log.v("RING",printRing());
 		try {
 			ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
 			new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
-
+			if(tableExist){
+				finishStaringAvd();
+			}
 		} catch (IOException e) {
 			Log.e(TAG, "Can't create a ServerSocket");
 			e.printStackTrace();
 		}
-
 		return false;
 	}
 
 
+	public void finishStaringAvd(){
+		try{
+			SQLiteDatabase db = dbHelper.getWritableDatabase();
+			Node n = ring.get(genHash(myId));
+			Node succ = n.getSucc();
+			Node succsucc = n.getSucc().getSucc();
+			signalInit1 = false;
+			MatrixCursor mc;
+			OtherClientTask clientTask = new OtherClientTask();
+			clientTask.execute("QUERY_ALL_INIT","ALL",n.port,succ.port,succsucc.port);
+			while(!signalInit1){}
+			Log.v("QUERY_ALL_INIT2",receivedKeyValueQuery+"~");
+			if(receivedKeyValueQuery!=null){
+				mc = mapToCurReceivedKeyQuery(receivedKeyValueQuery);
+				storeLatestKeysAndSource(mc,myId);
+			}
+		}catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+		}
 
+	}
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
+
+		if(selection.equals("*")){
+			signalDelete1 = false;
+			Log.v("DELETE_ALL: ", selection);
+			handleDelete(uri,selection);
+			ClientTask clientTask = new ClientTask();
+			clientTask.doInBackground("DELETE_ALL",selection);
+			while(!signalDelete1){}
+		}else if(selection.equals("@")){
+			handleDelete(uri,selection);
+		}else{
+			String keyHashed = "";
+			try {
+				keyHashed = genHash(selection);
+			} catch (NoSuchAlgorithmException e) {
+				e.printStackTrace();
+			}
+			Map.Entry e1 = ring.lowerEntry(keyHashed);
+			Map.Entry e2 = ring.higherEntry(keyHashed);
+			Node n;
+
+			if(e2 != null && e1 != null){
+				n = (Node) e2.getValue();
+			}else{
+				Map.Entry eLow = ring.firstEntry();
+				n = (Node) eLow.getValue();
+			}
+
+			Node succ = n.getSucc();
+			Node succsucc = n.getSucc().getSucc();
+			if(n.port.equalsIgnoreCase(myPort)){
+				signalDelete1 = false;
+				handleDelete(uri,selection);
+				Log.v("DELETE_KEY_SELF: ", n.key+"~"+succ.key+"~"+succsucc.key);
+				ClientTask clientTask = new ClientTask();
+				clientTask.doInBackground("DELETE_KEY",selection,n.port,succ.port,succsucc.port);
+				while(!signalDelete1){}
+			}else{
+				signalDelete1 = false;
+//				handleDelete(uri,selection);
+				Log.v("DELETE_KEY_SELF: ", n.key+"~"+succ.key+"~"+succsucc.key);
+				ClientTask clientTask = new ClientTask();
+				clientTask.doInBackground("DELETE_KEY",selection,n.port,succ.port,succsucc.port);
+				while(!signalDelete1){}
+			}
+		}
+
 		return 0;
+	}
+
+	private void handleDelete(Uri uri, String selection) {
+		SQLiteDatabase  db = dbHelper.getWritableDatabase();
+		if(selection.equals("*") || selection.equals("@")){
+			db.delete(TABLE_NAME, null, null);
+		}else{
+			String whereClause = COLUMN_NAME_KEY + " = ? ";
+			String[] whereArgs = new String[]{selection};
+			int deletedRow = db.delete(TABLE_NAME, whereClause, whereArgs);
+			Log.v("DELETE_HANDLE",deletedRow+"~"+selection);
+		}
 	}
 
 	@Override
@@ -124,20 +211,20 @@ public class SimpleDynamoProvider extends ContentProvider {
 				Map.Entry eLow = ring.firstEntry();
 				n = (Node) eLow.getValue();
 			}
-			Node pred = n.getPred();
-			Node predpred = n.getPred().getPred();
+			Node succ = n.getSucc();
+			Node succsucc = n.getSucc().getSucc();
 
 			if(n.port.equalsIgnoreCase(myPort)){
 				String source = myPort;
 				handleInsert(uri,values,source);
-				Log.v("INSERT_SELF: ", n.key+"~"+pred.key+"~"+predpred.key);
+				Log.v("INSERT_SELF: ", n.key+"~"+succ.key+"~"+succsucc.key);
 				ClientTask clientTask = new ClientTask();
-				clientTask.doInBackground("INSERT_KEY",actualKey,value,n.port,pred.port,predpred.port);
+				clientTask.doInBackground("INSERT_KEY",actualKey,value,n.port,succ.port,succsucc.port);
 				while(!insertKey){}
 			}else{
-				Log.v("INSERT_SEND: ", n.key+"~"+pred.key+"~"+predpred.key);
+				Log.v("INSERT_SEND: ", n.key+"~"+succ.key+"~"+succsucc.key);
 				ClientTask clientTask = new ClientTask();
-				clientTask.doInBackground("SEND_KEY",actualKey,value,n.port, pred.port,predpred.port);
+				clientTask.doInBackground("SEND_KEY",actualKey,value,n.port, succ.port,succsucc.port);
 			}
 		}catch (NoSuchAlgorithmException ne){
 			ne.printStackTrace();
@@ -148,19 +235,33 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     public long handleInsert(Uri uri, ContentValues values, String source){
 		int version = 1;
-        long newRowId;
+        long newRowId =0;
 		String sourceHash ="";
 		try {
-			sourceHash = genHash(portMap.get(source));
-		} catch (NoSuchAlgorithmException e) {
+			sourceHash = portMap.get(source);
+		} catch (Exception e) {
 			e.printStackTrace();
 		}
 		String key = (String) values.get(COLUMN_NAME_KEY);
         values.put(COLUMN_NAME_SOURCE,sourceHash);
-		values.put(COLUMN_NAME_VERSION,version);
+
 
         SQLiteDatabase db = dbHelper.getWritableDatabase();
-        newRowId = db.replaceOrThrow(TABLE_NAME, null, values);
+
+		String whereClause = COLUMN_NAME_KEY + " = ? ";
+		String[] whereArgs = new String[]{key};
+		Cursor cursor = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+
+		if(cursor.getCount() > 0){
+			cursor.moveToPosition(0);
+			int v = Integer.parseInt(cursor.getString(3));
+			values.put(COLUMN_NAME_VERSION,v+1);
+			newRowId = db.replaceOrThrow(TABLE_NAME, null, values);
+		}else{
+			values.put(COLUMN_NAME_VERSION,version);
+			newRowId = db.replaceOrThrow(TABLE_NAME, null, values);
+		}
+
         Log.v("Inserted Key: ", key);
         return newRowId;
     }
@@ -170,7 +271,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public Cursor query(Uri uri, String[] projection, String selection,
 			String[] selectionArgs, String sortOrder) {
 
-		Cursor cursor = null;
+//		Cursor cursor = null;
 //		myKeyVal = new StringBuilder();
 		signalQuery1 = false;
 		// https://stackoverflow.com/questions/10600670/sqlitedatabase-query-method
@@ -180,9 +281,35 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		try{
 			if(selection.equalsIgnoreCase("*")){
-
+				signalQuery1 = false;
+				signalQuery2 = false;
+				Cursor cur = handleQuery(uri,selection,"*");
+				Log.v("QUERY_SELF: ", selection);
+				ClientTask clientTask = new ClientTask();
+				clientTask.doInBackground("QUERY_ALL",selection,"*");
+				while(!signalQuery1){}
+				MatrixCursor mc = mapToCurReceivedKeyQuery(receivedKeyValueQuery);
+				Cursor newcursor = mergeCursor(cur, mc);
+				signalQuery2 = true;
+				return findLatestKeys(newcursor);
 			}else if(selection.equalsIgnoreCase("@")){
+                String source = myPort;
+                signalQuery1 = false;
+                signalQuery2 = false;
+                Node n = ring.get(genHash(myId));
+                Node pred = n.getSucc();
+                Node predpred = n.getSucc().getSucc();
 
+                Cursor cur = handleQuery(uri,selection,source);
+                return convertCursor(cur);
+                /*Log.v("QUERY_SELF: ", n.key+"~"+pred.key+"~"+predpred.key);
+                ClientTask clientTask = new ClientTask();
+                clientTask.doInBackground("QUERY_KEY",selection,n.port,pred.port,predpred.port);
+                while(!signalQuery1){}
+                MatrixCursor mc = mapToCurReceivedKeyQuery(receivedKeyValueQuery);
+                Cursor newcursor = mergeCursor(cur, mc);
+                signalQuery2 = true;
+                return findLatestKeys(newcursor);*/
 			}else{
 				String keyHashed = genHash(selection);
 				Map.Entry e1 = ring.lowerEntry(keyHashed);
@@ -196,8 +323,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 					n = (Node) eLow.getValue();
 				}
 
-				Node pred = n.getPred();
-				Node predpred = n.getPred().getPred();
+				Node pred = n.getSucc();
+				Node predpred = n.getSucc().getSucc();
 
 				if(n.port.equalsIgnoreCase(myPort)){
 					String source = myPort;
@@ -211,7 +338,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					MatrixCursor mc = mapToCurReceivedKeyQuery(receivedKeyValueQuery);
 					Cursor newcursor = mergeCursor(cur, mc);
 					signalQuery2 = true;
-					return findLatestKeys(newcursor);
+					return findThisKey(findLatestKeys(newcursor),selection);
 				}else{
 					Log.v("QUERY_SEND: ", n.key+"~"+pred.key+"~"+predpred.key);
 					ClientTask clientTask = new ClientTask();
@@ -220,38 +347,140 @@ public class SimpleDynamoProvider extends ContentProvider {
 					MatrixCursor mc = mapToCurReceivedKeyQuery(receivedKeyValueQuery);
 					Log.v("Sent Key : ", selection+" port:"+n.port);
 					signalQuery2 = true;
-					return findLatestKeys(mc);
+					return findThisKey(findLatestKeys(mc),selection);
 				}
 			}
 		}catch (NoSuchAlgorithmException e) {
 			e.printStackTrace();
+			return null;
 		}
 
-		return cursor;
+//		return cursor;
+	}
+
+	private Cursor findThisKey(Cursor cursor, String key){
+		cursor.moveToPosition(-1);
+		String[] colNames = {"key","value"};
+		MatrixCursor cur = new MatrixCursor(colNames);
+		while(cursor.moveToNext()){
+			if(cursor.getString(0).equals(key)){
+				String[] row = {cursor.getString(0),cursor.getString(1)};
+				cur.addRow(row);
+				break;
+			}
+		}
+		Log.v("findThisKey",cur.getCount()+"~");
+		return cur;
+	}
+
+	private Cursor convertCursor(Cursor cursor){
+		Log.v("ConvertCursor",cursor.getCount()+"~");
+		String[] colNames = {"key","value"};
+		MatrixCursor cur = new MatrixCursor(colNames);
+		if(cursor.getCount() >0 ){
+			cursor.moveToPosition(0);
+			String[] row = {cursor.getString(0),cursor.getString(1)};
+			cur.addRow(row);
+			while(cursor.moveToNext()){
+				Log.v("ConvertCursorROW",cursor.getString(0)+"~"+cursor.getString(1));
+				String[] row1 = {cursor.getString(0),cursor.getString(1)};
+				cur.addRow(row1);
+			}
+		}
+
+		Log.v("ConvertCursor",cur.getCount()+"~");
+		return cur;
+	}
+	private void storeLatestKeysAndSource(Cursor cursor,String source) {
+		SQLiteDatabase db = dbHelper.getWritableDatabase();
+		HashMap<String,KeyStore> keyVal = new HashMap<String, KeyStore>();
+		String[] colNames = {"key","value"};
+		MatrixCursor cur = new MatrixCursor(colNames);
+		Log.v("storeLatestKeys1",cursor.getCount()+"~");
+
+		if(cursor.getCount() >0 ){
+			cursor.moveToPosition(-1);
+			while(cursor.moveToNext()){
+				String ke = cursor.getString(0);
+				String v = cursor.getString(1);
+				String s = cursor.getString(2);
+				String ve = cursor.getString(3);
+				if(ke != null && v != null && s != null && ve != null && !ve.equals("null")){
+					Log.v("DEBUG",ke+"~"+v+"~"+s+"~"+ve);
+					if(!keyVal.containsKey(ke)){
+						keyVal.put(ke,new KeyStore(ke,v,s,ve));
+					}else{
+						KeyStore k = keyVal.get(cursor.getString(0));
+						if(k.version!=null && (Integer.parseInt(k.version) < Integer.parseInt(ve))){
+							keyVal.put(ke,new KeyStore(ke,v,s,ve));
+						}
+					}
+				}
+
+			}
+		}
+
+		Log.v("storeLatestKeys2",keyVal.size()+"~");
+
+		for(Map.Entry keys : keyVal.entrySet()){
+			KeyStore k = (KeyStore) keys.getValue();
+//			if(k.source.equals(source)){
+				String whereClause = COLUMN_NAME_KEY + " = ? ";
+				String[] whereArgs = new String[]{k.key};
+				Cursor cur1 = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+
+				ContentValues values = new ContentValues();
+				values.put(COLUMN_NAME_KEY,k.key);
+				values.put(COLUMN_NAME_VALUE,k.value);
+				values.put(COLUMN_NAME_SOURCE,k.source);
+
+				if(cur1.getCount() <= 0){
+					values.put(COLUMN_NAME_VERSION,k.version);
+					db.replaceOrThrow(TABLE_NAME, null, values);
+				}else{
+					int curV = Integer.parseInt(cur1.getString(3));
+					int kv = Integer.parseInt(k.version);
+					if(kv > curV) values.put(COLUMN_NAME_VERSION,kv+1);
+					else	values.put(COLUMN_NAME_VERSION,curV+1);
+					db.replaceOrThrow(TABLE_NAME, null, values);
+				}
+
+				Log.v("VALUES",values.getAsString(COLUMN_NAME_KEY)+"~"+values.getAsString(COLUMN_NAME_VERSION));
+//			}
+		}
+
+		Log.v("storeLatestKeys3",keyVal.size()+"~");
 	}
 
 	private Cursor findLatestKeys(Cursor cursor) {
 		HashMap<String,KeyStore> keyVal = new HashMap<String, KeyStore>();
 		String[] colNames = {"key","value"};
 		MatrixCursor cur = new MatrixCursor(colNames);
+		Log.v("findLatestKeys1",cursor.getCount()+"~");
 
-		while(cursor.moveToNext()){
-			if(!keyVal.containsKey(cursor.getString(0))){
-				keyVal.put(cursor.getString(0),new KeyStore(cursor.getString(0),
-							cursor.getString(1),cursor.getString(2),cursor.getString(3)));
-			}else{
-				KeyStore k = keyVal.get(cursor.getString(0));
-				if(Integer.parseInt(k.version) < Integer.parseInt(cursor.getString(3))){
+		if(cursor.getCount() >0 ){
+			cursor.moveToPosition(-1);
+			while(cursor.moveToNext()){
+				if(!keyVal.containsKey(cursor.getString(0))){
 					keyVal.put(cursor.getString(0),new KeyStore(cursor.getString(0),
 							cursor.getString(1),cursor.getString(2),cursor.getString(3)));
+				}else{
+					KeyStore k = keyVal.get(cursor.getString(0));
+					if(Integer.parseInt(k.version) < Integer.parseInt(cursor.getString(3))){
+						keyVal.put(cursor.getString(0),new KeyStore(cursor.getString(0),
+								cursor.getString(1),cursor.getString(2),cursor.getString(3)));
+					}
 				}
 			}
 		}
+		Log.v("findLatestKeys2",keyVal.size()+"~");
 		for(Map.Entry keys : keyVal.entrySet()){
 			KeyStore k = (KeyStore) keys.getValue();
-			String[] row = {k.key,k.value,k.source,k.version};
+			String[] row = {k.key,k.value};
 			cur.addRow(row);
 		}
+
+		Log.v("findLatestKeys3",cur.getCount()+"~");
 		return cur;
 	}
 	class KeyStore{
@@ -297,22 +526,36 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	public Cursor handleQuery(Uri uri, String selection, String source){
 		Cursor cursor;
-		//myKeyVal = new StringBuilder();
+		Log.v("HANDLE_QUERY",selection+"~"+portMap.get(source));
+
 		sendKeyValueQuery = new StringBuilder();
 		SQLiteDatabase db = dbHelper.getWritableDatabase();
-		String whereClause = COLUMN_NAME_KEY + " = ? and "+COLUMN_NAME_SOURCE+" = ? ";
-		if(!selection.equals("*") && !selection.equals("@")){
-			String[] whereArgs = new String[]{selection,source};
-			cursor = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
-		}else {
-			String[] whereArgs = new String[]{"*",source};
-			cursor = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+		if(source.equals("*")){
+			cursor = db.query(TABLE_NAME,null, null, null, null, null, null);
+		}else{
+			source = portMap.get(source);
+			if(selection.equals("*") || selection.equals("@")){
+				Log.v("HANDLE_QUERY1",selection+"~"+source);
+				cursor = db.query(TABLE_NAME,null, null, null, null, null, null);
+			}else if(selection.equals("ALL")){
+				String whereClause = COLUMN_NAME_SOURCE+" = ? ";
+				String[] whereArgs = new String[]{source};
+				Log.v("HANDLE_QUERY2",selection+"~"+source);
+				cursor = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+			}else {
+				Log.v("HANDLE_QUERY3",selection+"~"+source);
+				String whereClause = COLUMN_NAME_KEY + " = ? and "+COLUMN_NAME_SOURCE+" = ? ";
+				String[] whereArgs = new String[]{selection,source};
+				cursor = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+			}
 		}
+
 		while(cursor.moveToNext()){
 			String row = cursor.getString(0)+"@"+cursor.getString(1)+"@"+cursor.getString(2)
 					+"@"+cursor.getString(3)+"#";
 			sendKeyValueQuery.append(row);
 		}
+		Log.v("HANDLE_QUERY4",sendKeyValueQuery.toString());
 		return cursor;
 	}
 
@@ -322,7 +565,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String str = "key = '"+selection+"'";
 		SQLiteDatabase db = dbHelper.getWritableDatabase();
 		int count = db.update(TABLE_NAME, values, str, selectionArgs);
-//        Log.v("update Row: ", count+"");
+        Log.v("update Row: ", count+"");
 		return count;
 	}
 
@@ -348,6 +591,45 @@ public class SimpleDynamoProvider extends ContentProvider {
 						publishProgress("INSERT_KEY",key,val,source);
 						while(!insertedKey){}
 						String replyToClient = "INSERT_KEY";
+						DataOutputStream output = new DataOutputStream(sc.getOutputStream());
+						output.writeUTF(replyToClient);
+					}else if(reqType.equalsIgnoreCase("QUERY_KEY") || reqType.equalsIgnoreCase("QUERY_SEND_KEY")){
+                        String key = rect[1];
+                        String source = rect[2];
+						signalQuery3 = false;
+                        publishProgress("QUERY_KEY",key,source);
+                        while(!signalQuery3){}
+                        Log.v("SERVER_QUERY_KEY",sendKeyValueQuery+"****");
+                        String replyToClient = "QUERY_KEY"+"~"+sendKeyValueQuery;
+                        DataOutputStream output = new DataOutputStream(sc.getOutputStream());
+                        output.writeUTF(replyToClient);
+                    }else if(reqType.equalsIgnoreCase("QUERY_ALL")){
+						String key = rect[1];
+						String source = rect[2];
+						signalQuery3 = false;
+						publishProgress("QUERY_KEY",key,"*");
+						while(!signalQuery3){}
+						Log.v("SERVER_QUERY_ALL",sendKeyValueQuery+"****");
+						String replyToClient = "QUERY_KEY"+"~"+sendKeyValueQuery;
+						DataOutputStream output = new DataOutputStream(sc.getOutputStream());
+						output.writeUTF(replyToClient);
+					}else if(reqType.equalsIgnoreCase("DELETE_KEY")){
+						String key = rect[1];
+						signalDelete2 = false;
+						publishProgress("DELETE_KEY",key);
+						while(!signalDelete2){}
+						Log.v("SERVER_QUERY_ALL",key+"****");
+						String replyToClient = "DELETE_KEY";
+						DataOutputStream output = new DataOutputStream(sc.getOutputStream());
+						output.writeUTF(replyToClient);
+					}else if(reqType.equalsIgnoreCase("QUERY_ALL_INIT")){
+						String key = rect[1];
+						String source = rect[2];
+						signalInit2 = false;
+						publishProgress("QUERY_ALL_INIT",key,source);
+						while(!signalInit2){}
+						Log.v("SERVER_QUERY_ALL_INIT",sendKeyValueQuery+"****");
+						String replyToClient = "QUERY_ALL_INIT"+"~"+sendKeyValueQuery;
 						DataOutputStream output = new DataOutputStream(sc.getOutputStream());
 						output.writeUTF(replyToClient);
 					}
@@ -388,12 +670,100 @@ public class SimpleDynamoProvider extends ContentProvider {
 				Uri mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledynamo.provider");
 				handleInsert(mUri, cv,source);
 				insertedKey = true;
+			}else if(param.equalsIgnoreCase("QUERY_KEY")){
+				signalQuery3 = false;
+				String key = strings[1];
+				String source = strings[2];
+				Log.v("QUERY_KEY_Other1",key+"~"+source);
+				Uri mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledynamo.provider");
+				handleQuery(mUri, key,source);
+				Log.v("QUERY_KEY_Other2",key+"~"+source+"~"+sendKeyValueQuery);
+				signalQuery3 = true;
+			}else if(param.equalsIgnoreCase("DELETE_KEY")){
+				signalDelete2 = false;
+				String key = strings[1];
+				Log.v("DELETE_KEY_Other1",key);
+				Uri mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledynamo.provider");
+				handleDelete(mUri, key);
+				Log.v("DELETE_KEY_Other2",key);
+				signalDelete2 = true;
+			}else if(param.equalsIgnoreCase("QUERY_ALL_INIT")){
+				signalInit2 = false;
+				String key = strings[1];
+				String source = strings[2];
+				Log.v("QUERY_INIT_Other1",key+"~"+source);
+				Uri mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledynamo.provider");
+				handleQuery(mUri, key,source);
+				Log.v("QUERY_INIT_Other2",key+"~"+source+"~"+sendKeyValueQuery);
+				signalInit2 = true;
 			}
 
 			return null;
 		}
 	}
 
+	class OtherClientTask extends AsyncTask<String, Void, Void>{
+
+		@Override
+		protected Void doInBackground(String... msgs) {
+			String msg = msgs[0];
+			DataInputStream ackRec;
+			DataOutputStream output;
+
+			if(msg.equalsIgnoreCase("QUERY_ALL_INIT") ){
+				signalInit1 = false;
+				receivedKeyValueQuery = new StringBuilder();
+				String key = msgs[1];
+				String source = msgs[2];
+				String port1 = msgs[3];
+				String port2 = msgs[4];
+
+				for(String p : REMOTE_PORT){
+					if(!p.equals(myPort)){
+						try{
+							Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+									Integer.parseInt(p));
+							socket.setSoTimeout(5000);
+							String msgToSend ="";
+							if(p.equals(port1) || p.equals(port2))
+								msgToSend = msg+"~"+key+"~"+source;
+							else
+								msgToSend = msg+"~"+key+"~"+p;
+
+							Log.v("Client_Request_INIT:",msgToSend+"~"+p);
+							output = new DataOutputStream(socket.getOutputStream());
+							output.writeUTF(msgToSend);
+
+							ackRec = new DataInputStream(socket.getInputStream());
+							String ackStr = ackRec.readUTF();
+							Log.v("Client_Ack_INIT:",ackStr+"~"+p);
+							String[] receivedInfo = ackStr.split("~");
+
+							if(receivedInfo[0].equals("QUERY_ALL_INIT")){
+								if(receivedInfo.length > 1){
+									receivedKeyValueQuery.append(receivedInfo[1]);
+								}
+
+								output.close();
+								ackRec.close();
+								socket.close();
+							}
+						}catch(SocketTimeoutException e){
+							Log.e(TAG, "ClientOtherTask socket SocketTimeoutException");
+						}catch(IOException e){
+							Log.e(TAG, "ClientOtherTask socket IOException");
+						}catch(Exception e){
+							e.printStackTrace();
+							Log.e(TAG, "ClientOtherTask Exception OtherTask");
+						}
+					}
+				}
+				Log.v("QUERY_ALL_INIT_KEYS",receivedKeyValueQuery+":");
+				signalInit1 = true;
+			}
+			return null;
+		}
+	}
 
 	class ClientTask extends AsyncTask<String, Void, Void>{
 
@@ -407,16 +777,15 @@ public class SimpleDynamoProvider extends ContentProvider {
 					signalQuery1 = false;
 					receivedKeyValueQuery = new StringBuilder();
 					String key = msgs[1];
-					String val = msgs[2];
-					String source = msgs[3];
+					String source = msgs[2];
 					ArrayList<String> port = new ArrayList<String>();
 					if(msg.equalsIgnoreCase("QUERY_KEY")){
-						port.add(msgs[4]);
-						port.add(msgs[5]);
-					}else{
 						port.add(msgs[3]);
 						port.add(msgs[4]);
-						port.add(msgs[5]);
+					}else{
+						port.add(msgs[2]);
+						port.add(msgs[3]);
+						port.add(msgs[4]);
 					}
 
 					for(String p : port){
@@ -435,8 +804,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 							String[] receivedInfo = ackStr.split("~");
 
 							if(receivedInfo[0].equals("QUERY_KEY")){
-								signalQuery1 = true;
-								receivedKeyValueQuery.append(receivedInfo[1]);
+								if(receivedInfo.length > 1)
+									receivedKeyValueQuery.append(receivedInfo[1]);
 								output.close();
 								ackRec.close();
 								socket.close();
@@ -450,6 +819,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 							Log.e(TAG, "ClientTask Exception Initial");
 						}
 					}
+					signalQuery1 = true;
 				}else if(msg.equalsIgnoreCase("INSERT_KEY") || msg.equalsIgnoreCase("SEND_KEY")){
 					insertKey = false;
 					String key = msgs[1];
@@ -481,7 +851,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 							String[] receivedInfo = ackStr.split("~");
 
 							if(receivedInfo[0].equals("INSERT_KEY")){
-								insertKey = true;
 								output.close();
 								ackRec.close();
 								socket.close();
@@ -495,6 +864,99 @@ public class SimpleDynamoProvider extends ContentProvider {
 							Log.e(TAG, "ClientTask Exception Initial");
 						}
 					}
+                    insertKey = true;
+				}else if(msg.equalsIgnoreCase("QUERY_ALL")){
+					signalQuery1 = false;
+					receivedKeyValueQuery = new StringBuilder();
+					String key = msgs[1];
+					String source = msgs[2];
+
+					for(String p : REMOTE_PORT){
+						if(!p.equals(myPort)){
+							try{
+								Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+										Integer.parseInt(p));
+								socket.setSoTimeout(5000);
+								String msgToSend = msg+"~"+key+"~"+source;
+								Log.v("Client Request:",msgToSend+"~"+p);
+								output = new DataOutputStream(socket.getOutputStream());
+								output.writeUTF(msgToSend);
+
+								ackRec = new DataInputStream(socket.getInputStream());
+								String ackStr = ackRec.readUTF();
+								Log.v("Client Ack from Server:",ackStr+"~"+p);
+								String[] receivedInfo = ackStr.split("~");
+
+								if(receivedInfo[0].equals("QUERY_KEY")){
+									if(receivedInfo.length > 1)
+										receivedKeyValueQuery.append(receivedInfo[1]);
+									output.close();
+									ackRec.close();
+									socket.close();
+								}
+							}catch(SocketTimeoutException e){
+								Log.e(TAG, "ClientTask socket SocketTimeoutException");
+							}catch(IOException e){
+								Log.e(TAG, "ClientTask socket IOException");
+							}catch(Exception e){
+								e.printStackTrace();
+								Log.e(TAG, "ClientTask Exception Initial");
+							}
+						}
+					}
+					signalQuery1 = true;
+				}else if(msg.equalsIgnoreCase("DELETE_KEY") || msg.equalsIgnoreCase("DELETE_ALL")){
+					signalDelete1 = false;
+					String key = msgs[1];
+					ArrayList<String> port = new ArrayList<String>();
+					if(!msg.equalsIgnoreCase("DELETE_ALL")){
+						String source = msgs[2];
+						if(source.equals(myPort)){
+							port.add(msgs[3]);
+							port.add(msgs[4]);
+						}else{
+							port.add(msgs[2]);
+							port.add(msgs[3]);
+							port.add(msgs[4]);
+						}
+					}else{
+						for(String p: REMOTE_PORT){
+							if(!p.equals(myPort))
+								port.add(p);
+						}
+					}
+
+
+					for(String p : port){
+						try{
+							Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+									Integer.parseInt(p));
+							socket.setSoTimeout(5000);
+							String msgToSend = msg+"~"+key;
+							Log.v("Client Request:",msgToSend+"~"+p);
+							output = new DataOutputStream(socket.getOutputStream());
+							output.writeUTF(msgToSend);
+
+							ackRec = new DataInputStream(socket.getInputStream());
+							String ackStr = ackRec.readUTF();
+							Log.v("Client Ack from Server:",ackStr+"~"+p);
+							String[] receivedInfo = ackStr.split("~");
+
+							if(receivedInfo[0].equals("DELETE_KEY")){
+								output.close();
+								ackRec.close();
+								socket.close();
+							}
+						}catch(SocketTimeoutException e){
+							Log.e(TAG, "ClientTask socket SocketTimeoutException");
+						}catch(IOException e){
+							Log.e(TAG, "ClientTask socket IOException");
+						}catch(Exception e){
+							e.printStackTrace();
+							Log.e(TAG, "ClientTask Exception Initial");
+						}
+					}
+					signalDelete1 = true;
 				}
 			}catch(Exception e){
 				e.printStackTrace();
@@ -554,7 +1016,18 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 
 	}
+
+	private String printRing() {
+		String test="";
+		for(Map.Entry<String, Node> node : ring.entrySet()){
+//                test += node.getValue().key+" "+node.getValue().pred.getKey()+" "+node.getValue().succ.key+"^^";
+			test += node.getValue().key+" "+node.getValue().succ.key+"^^";
+		}
+		return test;
+	}
+
 	/*https://developer.android.com/training/data-storage/sqlit*/
+
 	public class FeedReaderDbHelper extends SQLiteOpenHelper {
 		// If you change the database schema, you must increment the database version.
 		public static final int DATABASE_VERSION = 1;
@@ -567,17 +1040,38 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		public FeedReaderDbHelper(Context context) {
 			super(context, DATABASE_NAME, null, DATABASE_VERSION);
-
+			Log.v("ON_CREATE1","!!!!!!!!!!!!!!!");
 		}
 		@Override
 		public void onCreate(SQLiteDatabase db) {
-			db.execSQL(SQL_CREATE_ENTRIES);
+			try{
+				tableExist =false;
+				Log.v("ON_CREATE2","!!!!!!!!!!!!!!!");
+				db.execSQL(SQL_CREATE_ENTRIES);
+			}catch (Exception e){
+				e.printStackTrace();
+			}
 		}
 		public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
 			onCreate(db);
 		}
 		public void onDowngrade(SQLiteDatabase db, int oldVersion, int newVersion) {
 			onUpgrade(db, oldVersion, newVersion);
+		}
+
+		public boolean checkTable(SQLiteDatabase db) {
+			String str = "select DISTINCT tbl_name from sqlite_master";
+			Cursor cursor = db.rawQuery(str,null);
+			Log.v("ON_CREATE2",cursor.getCount()+"!");
+			while(cursor.moveToNext()){
+				Log.v("ON_CREATE_03","EXIST! "+cursor.getString(0));
+				if(cursor.getString(0).equals("dynamo")){
+					tableExist = true;
+					Log.v("ON_CREATE3","EXIST! EXIST!");
+				}
+			}
+
+			return tableExist;
 		}
 	}
 
