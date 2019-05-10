@@ -256,10 +256,10 @@ public class SimpleDynamoProvider extends ContentProvider {
 			cursor.moveToPosition(0);
 			int v = Integer.parseInt(cursor.getString(3));
 			values.put(COLUMN_NAME_VERSION,v+1);
-			newRowId = db.replaceOrThrow(TABLE_NAME, null, values);
+			newRowId = db.insertWithOnConflict(TABLE_NAME, null, values,SQLiteDatabase.CONFLICT_REPLACE);
 		}else{
 			values.put(COLUMN_NAME_VERSION,version);
-			newRowId = db.replaceOrThrow(TABLE_NAME, null, values);
+			newRowId = db.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_REPLACE);
 		}
 
         Log.v("Inserted Key: ", key);
@@ -416,7 +416,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 						}
 					}
 				}
-
 			}
 		}
 
@@ -424,29 +423,30 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		for(Map.Entry keys : keyVal.entrySet()){
 			KeyStore k = (KeyStore) keys.getValue();
-//			if(k.source.equals(source)){
-				String whereClause = COLUMN_NAME_KEY + " = ? ";
-				String[] whereArgs = new String[]{k.key};
-				Cursor cur1 = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
+			String whereClause = COLUMN_NAME_KEY + " = ? ";
+			String[] whereArgs = new String[]{k.key};
+			Cursor cur1 = db.query(TABLE_NAME,null, whereClause, whereArgs, null, null, null);
 
-				ContentValues values = new ContentValues();
-				values.put(COLUMN_NAME_KEY,k.key);
-				values.put(COLUMN_NAME_VALUE,k.value);
-				values.put(COLUMN_NAME_SOURCE,k.source);
+			ContentValues values = new ContentValues();
+			values.put(COLUMN_NAME_KEY,k.key);
+			values.put(COLUMN_NAME_VALUE,k.value);
+			values.put(COLUMN_NAME_SOURCE,k.source);
 
-				if(cur1.getCount() <= 0){
-					values.put(COLUMN_NAME_VERSION,k.version);
-					db.replaceOrThrow(TABLE_NAME, null, values);
-				}else{
-					int curV = Integer.parseInt(cur1.getString(3));
-					int kv = Integer.parseInt(k.version);
-					if(kv > curV) values.put(COLUMN_NAME_VERSION,kv+1);
-					else	values.put(COLUMN_NAME_VERSION,curV+1);
-					db.replaceOrThrow(TABLE_NAME, null, values);
-				}
+			if(cur1.getCount() <= 0){
+				values.put(COLUMN_NAME_VERSION,k.version);
+				db.replaceOrThrow(TABLE_NAME, null, values);
+				Log.v("VALUES1",values.getAsString(COLUMN_NAME_KEY)+"~"+k.value+"~"+values.getAsString(COLUMN_NAME_VERSION));
+			}else{
+				values.put(COLUMN_NAME_VERSION,k.version);
+//				int curV = Integer.parseInt(cur1.getString(3));
+//				int kv = Integer.parseInt(k.version);
+//				if(kv > curV) values.put(COLUMN_NAME_VERSION,kv+1);
+//				else	values.put(COLUMN_NAME_VERSION,curV+1);
+				db.replaceOrThrow(TABLE_NAME, null, values);
+                Log.v("VALUES2",values.getAsString(COLUMN_NAME_KEY)+"~"+k.value+"~"+values.getAsString(COLUMN_NAME_VERSION));
+			}
 
-				Log.v("VALUES",values.getAsString(COLUMN_NAME_KEY)+"~"+values.getAsString(COLUMN_NAME_VERSION));
-//			}
+//			Log.v("VALUES",values.getAsString(COLUMN_NAME_KEY)+"~"+values.getAsString(COLUMN_NAME_VERSION));
 		}
 
 		Log.v("storeLatestKeys3",keyVal.size()+"~");
@@ -1033,7 +1033,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		public static final int DATABASE_VERSION = 1;
 		public static final String DATABASE_NAME = "SimpleDynamo";
 		private final String SQL_CREATE_ENTRIES ="CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " ( "
-				+ COLUMN_NAME_KEY+" TEXT,"
+				+ COLUMN_NAME_KEY+" TEXT PRIMARY KEY,"
 				+ COLUMN_NAME_VALUE+" TEXT,"
 				+ COLUMN_NAME_SOURCE+" TEXT,"
 				+ COLUMN_NAME_VERSION + " TEXT)";
@@ -1057,21 +1057,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 		public void onDowngrade(SQLiteDatabase db, int oldVersion, int newVersion) {
 			onUpgrade(db, oldVersion, newVersion);
-		}
-
-		public boolean checkTable(SQLiteDatabase db) {
-			String str = "select DISTINCT tbl_name from sqlite_master";
-			Cursor cursor = db.rawQuery(str,null);
-			Log.v("ON_CREATE2",cursor.getCount()+"!");
-			while(cursor.moveToNext()){
-				Log.v("ON_CREATE_03","EXIST! "+cursor.getString(0));
-				if(cursor.getString(0).equals("dynamo")){
-					tableExist = true;
-					Log.v("ON_CREATE3","EXIST! EXIST!");
-				}
-			}
-
-			return tableExist;
 		}
 	}
 
